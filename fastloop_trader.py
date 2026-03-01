@@ -410,29 +410,55 @@ def _parse_fast_market_end_time(question):
 def find_best_fast_market(markets):
     """Pick the best fast market to trade.
 
-    We want the market that is *currently live* (ends soon, but not too soon).
-    Gamma endDate is authoritative; question parsing is fallback only.
+    Selection goals:
+      1) market is live now (ends soon, but not too soon)
+      2) liquidity is reasonable (tight spread)
+      3) depth isn't tiny
+
+    We prefer the best (lowest spread) market among live candidates.
     """
     now = datetime.now(timezone.utc)
-    # Don't consider markets that end too far in the future; for 5m, allow up to 2 windows.
     max_remaining = _window_seconds.get(WINDOW, 300) * 2
-    candidates = []
+
+    scored = []
     for m in markets:
         end_time = m.get("end_time")
         if not end_time:
             continue
         remaining = (end_time - now).total_seconds()
-        # remaining negative => already ended
         if remaining <= 0:
             continue
-        if remaining > MIN_TIME_REMAINING and remaining < max_remaining:
-            candidates.append((remaining, m))
+        if not (remaining > MIN_TIME_REMAINING and remaining < max_remaining):
+            continue
 
-    if not candidates:
+        clob_tokens = m.get("clob_token_ids") or []
+        book = fetch_orderbook_summary(clob_tokens) if clob_tokens else None
+        if not book:
+            continue
+
+        spread = float(book.get("spread_pct") or 999)
+        bid_depth = float(book.get("bid_depth_usd") or 0)
+        ask_depth = float(book.get("ask_depth_usd") or 0)
+        depth = min(bid_depth, ask_depth)
+
+        # Skip obviously broken books (or ultra-wide)
+        if spread <= 0 or spread > 5:
+            continue
+
+        # Score: prefer low spread; then more depth; then closer expiry
+        # (lower score = better)
+        score = spread * 100.0 - (depth / 1000.0) + (remaining / 10000.0)
+        scored.append((score, m, book))
+
+    if not scored:
         return None
 
-    candidates.sort(key=lambda x: x[0])
-    return candidates[0][1]
+    scored.sort(key=lambda x: x[0])
+    best_score, best_market, best_book = scored[0]
+    # attach best book so main loop doesn't have to refetch
+    best_market["_book"] = best_book
+    best_market["_score"] = best_score
+    return best_market
 
 
 # =============================================================================
@@ -842,7 +868,7 @@ def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=Fal
             _automaton_reported = True
 
     # Check order book spread and depth
-    book = fetch_orderbook_summary(clob_tokens) if clob_tokens else None
+    book = best.get("_book") or (fetch_orderbook_summary(clob_tokens) if clob_tokens else None)
     if book:
         log(f"  Spread: {book['spread_pct']:.1%} (bid ${book['best_bid']:.3f} / ask ${book['best_ask']:.3f})")
         log(f"  Depth: ${book['bid_depth_usd']:.0f} bid / ${book['ask_depth_usd']:.0f} ask (top 5)")
