@@ -109,6 +109,10 @@ LOOKBACK_MINUTES = cfg["lookback_minutes"]
 ASSET = cfg["asset"].upper()
 WINDOW = cfg["window"]  # "5m" or "15m"
 
+# Multi-scan (paper-only)
+FASTLOOP_ASSETS = os.environ.get("FASTLOOP_ASSETS", "BTC,ETH,SOL").split(",")
+FASTLOOP_WINDOWS = os.environ.get("FASTLOOP_WINDOWS", "5m,15m").split(",")
+
 # Dynamic min_time_remaining: 0 = auto (10% of window duration)
 _window_seconds = {"5m": 300, "15m": 900, "1h": 3600}
 _configured_min_time = cfg["min_time_remaining"]
@@ -524,6 +528,25 @@ def find_best_fast_market(markets):
     best_market["_score"] = best_score
     return best_market
 
+
+
+
+def select_best_market_across(assets, windows):
+    """Scan multiple assets/windows and return the best market by liquidity."""
+    best = None
+    for asset in assets:
+        for win in windows:
+            markets = discover_fast_market_markets(asset.strip().upper(), win.strip())
+            candidate = find_best_fast_market(markets)
+            if not candidate:
+                continue
+            # Prefer lower score if present
+            score = candidate.get("_score", 1e9)
+            if best is None or score < best.get("_score", 1e9):
+                candidate["_asset"] = asset.strip().upper()
+                candidate["_window"] = win.strip()
+                best = candidate
+    return best
 
 # =============================================================================
 # CEX Price Signal
@@ -1222,7 +1245,10 @@ if __name__ == "__main__":
 
     def market_health_report():
         now = datetime.now(timezone.utc)
-        markets = discover_fast_market_markets(ASSET, WINDOW)
+        markets = []
+        for a in FASTLOOP_ASSETS:
+            for w in FASTLOOP_WINDOWS:
+                markets.extend(discover_fast_market_markets(a.strip().upper(), w.strip()))
         scanned = len(markets)
 
         live = []
@@ -1252,6 +1278,7 @@ if __name__ == "__main__":
 
         lines = [
             f"MARKET HEALTH | scanned={scanned} live={len(live)} liquid={len(ok)} (spread<={MAX_SPREAD_PCT:.0%}, depth>=200)",
+            f"assets={".".join([a.strip().upper() for a in FASTLOOP_ASSETS])} windows={".".join([w.strip() for w in FASTLOOP_WINDOWS])}",
         ]
         for spread, depth, bid, ask, rem, slug, q in top:
             lines.append(f"  top: spread={spread:.1%} bid={bid:.3f} ask={ask:.3f} depth~${depth:.0f} rem={int(rem)}s")
