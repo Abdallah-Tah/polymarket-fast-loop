@@ -1278,7 +1278,7 @@ if __name__ == "__main__":
 
         lines = [
             f"MARKET HEALTH | scanned={scanned} live={len(live)} liquid={len(ok)} (spread<={MAX_SPREAD_PCT:.0%}, depth>=200)",
-            f"assets={".".join([a.strip().upper() for a in FASTLOOP_ASSETS])} windows={".".join([w.strip() for w in FASTLOOP_WINDOWS])}",
+            "assets=%s windows=%s" % (".".join([a.strip().upper() for a in FASTLOOP_ASSETS]), ".".join([w.strip() for w in FASTLOOP_WINDOWS])),
         ]
         for spread, depth, bid, ask, rem, slug, q in top:
             lines.append(f"  top: spread={spread:.1%} bid={bid:.3f} ask={ask:.3f} depth~${depth:.0f} rem={int(rem)}s")
