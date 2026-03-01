@@ -604,7 +604,10 @@ def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=Fal
     log("=" * 50)
 
     if paper_mode:
+        broker = broker_from_env(Path(__file__).parent)
+        cash = float(broker.snapshot().get("cash_usd", 0.0))
         log("\n  [PAPER BROKER] Trades will be simulated with a local $ balance + real orderbooks. Use --live for real trades.")
+        log(f"  Paper cash:       ${cash:.2f} (PAPER_START_USD)")
     elif dry_run:
         log("\n  [DRY RUN] No trades will be executed. Use --live for real trades.")
 
