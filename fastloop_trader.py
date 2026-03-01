@@ -1240,8 +1240,18 @@ if __name__ == "__main__":
             pass
 
         if delta is None:
-            return f"PAPER REPORT | equity=${equity:.2f} cash=${cash:.2f} unreal=${unreal:.2f} pos={len(positions)}"
-        return f"PAPER REPORT | equity=${equity:.2f} (Δ1h {delta:+.2f}) cash=${cash:.2f} unreal=${unreal:.2f} pos={len(positions)}"
+            delta_str = "n/a"
+        else:
+            delta_str = f"{delta:+.2f}"
+
+        return (
+            "PAPER TRADING REPORT\n"
+            f"• Equity: ${equity:.2f}\n"
+            f"• Δ1h: {delta_str}\n"
+            f"• Cash: ${cash:.2f}\n"
+            f"• Unrealized P/L: ${unreal:.2f}\n"
+            f"• Open Positions: {len(positions)}"
+        )
 
     def market_health_report():
         now = datetime.now(timezone.utc)
@@ -1277,11 +1287,18 @@ if __name__ == "__main__":
         top = live[:3]
 
         lines = [
-            f"MARKET HEALTH | scanned={scanned} live={len(live)} liquid={len(ok)} (spread<={MAX_SPREAD_PCT:.0%}, depth>=200)",
-            "assets=%s windows=%s" % (".".join([a.strip().upper() for a in FASTLOOP_ASSETS]), ".".join([w.strip() for w in FASTLOOP_WINDOWS])),
+            "MARKET HEALTH\n"
+            f"• Scanned: {scanned}\n"
+            f"• Live Now: {len(live)}\n"
+            f"• Liquid (spread≤{MAX_SPREAD_PCT:.0%}, depth≥200): {len(ok)}\n"
+            f"• Assets: {', '.join([a.strip().upper() for a in FASTLOOP_ASSETS])}\n"
+            f"• Windows: {', '.join([w.strip() for w in FASTLOOP_WINDOWS])}\n"
+            "• Top Liquidity Samples:"
         ]
         for spread, depth, bid, ask, rem, slug, q in top:
-            lines.append(f"  top: spread={spread:.1%} bid={bid:.3f} ask={ask:.3f} depth~${depth:.0f} rem={int(rem)}s")
+            lines.append(
+                f"  - Spread {spread:.1%} | Bid {bid:.3f} | Ask {ask:.3f} | Depth ~${depth:.0f} | T- {int(rem)}s"
+            )
         return "\n".join(lines)
 
     # Mode selection
