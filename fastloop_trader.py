@@ -289,15 +289,28 @@ def fetch_orderbook_summary(clob_token_ids):
 # Sprint Market Discovery
 # =============================================================================
 
+def _parse_iso_dt(dt: str):
+    """Parse ISO8601 datetime like 2025-10-31T00:00:00Z -> aware UTC datetime."""
+    if not dt or not isinstance(dt, str):
+        return None
+    try:
+        # Gamma uses Z suffix
+        if dt.endswith("Z"):
+            dt = dt.replace("Z", "+00:00")
+        return datetime.fromisoformat(dt).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
 def discover_fast_market_markets(asset="BTC", window="5m"):
     """Find active fast markets on Polymarket via Gamma API."""
     patterns = ASSET_PATTERNS.get(asset, ASSET_PATTERNS["BTC"])
     url = (
         "https://gamma-api.polymarket.com/markets"
-        "?limit=100&closed=false&tag=crypto&order=endDate&ascending=true"
+        "?limit=200&closed=false&tag=crypto&order=endDate&ascending=true"
     )
     result = _api_request(url)
-    if not result or isinstance(result, dict) and result.get("error"):
+    if not result or (isinstance(result, dict) and result.get("error")):
         return []
 
     markets = []
@@ -309,8 +322,12 @@ def discover_fast_market_markets(asset="BTC", window="5m"):
             condition_id = m.get("conditionId", "")
             closed = m.get("closed", False)
             if not closed and slug:
-                # Parse end time from question (e.g., "5:30AM-5:35AM ET")
-                end_time = _parse_fast_market_end_time(m.get("question", ""))
+                # Prefer Gamma endDate when present; it's authoritative.
+                end_time = _parse_iso_dt(m.get("endDate") or m.get("end_date"))
+                if not end_time:
+                    # Fallback: parse from question (best effort)
+                    end_time = _parse_fast_market_end_time(m.get("question", ""))
+
                 # Capture CLOB token IDs for live price fetching
                 clob_tokens_raw = m.get("clobTokenIds", "[]")
                 if isinstance(clob_tokens_raw, str):
@@ -320,6 +337,7 @@ def discover_fast_market_markets(asset="BTC", window="5m"):
                         clob_tokens = []
                 else:
                     clob_tokens = clob_tokens_raw or []
+
                 markets.append({
                     "question": m.get("question", ""),
                     "slug": slug,
@@ -359,21 +377,29 @@ def _parse_fast_market_end_time(question):
 
 
 def find_best_fast_market(markets):
-    """Pick the best fast_market to trade: soonest expiring with enough time remaining."""
+    """Pick the best fast market to trade.
+
+    We want the market that is *currently live* (ends soon, but not too soon).
+    Gamma endDate is authoritative; question parsing is fallback only.
+    """
     now = datetime.now(timezone.utc)
-    max_remaining = _window_seconds.get(WINDOW, 300) * 2  # reject markets that haven't started yet (Gamma path handles live-now via time window; if a Simmer endpoint path is added, filter on is_live_now=True instead)
+    # Don't consider markets that end too far in the future; for 5m, allow up to 2 windows.
+    max_remaining = _window_seconds.get(WINDOW, 300) * 2
     candidates = []
     for m in markets:
         end_time = m.get("end_time")
         if not end_time:
             continue
         remaining = (end_time - now).total_seconds()
+        # remaining negative => already ended
+        if remaining <= 0:
+            continue
         if remaining > MIN_TIME_REMAINING and remaining < max_remaining:
             candidates.append((remaining, m))
 
     if not candidates:
         return None
-    # Sort by soonest expiring
+
     candidates.sort(key=lambda x: x[0])
     return candidates[0][1]
 
