@@ -305,51 +305,80 @@ def _parse_iso_dt(dt: str):
 def discover_fast_market_markets(asset="BTC", window="5m"):
     """Find active fast markets on Polymarket via Gamma API."""
     patterns = ASSET_PATTERNS.get(asset, ASSET_PATTERNS["BTC"])
-    # NOTE: Gamma sometimes returns stale fast markets with very old endDate but closed=false.
-    # Fetch newest first to increase chance of including current windows in the first page.
-    url = (
-        "https://gamma-api.polymarket.com/markets"
-        "?limit=500&closed=false&tag=crypto&order=endDate&ascending=false"
-    )
-    result = _api_request(url)
-    if not result or (isinstance(result, dict) and result.get("error")):
-        return []
+    # Gamma pagination: we page forward by endDate (ascending) until we reach "around now".
+    # We filter to a tight time band around now to avoid stale/old fast markets.
+    now = datetime.now(timezone.utc)
+    band_past = now - timedelta(days=1)
+    band_future = now + timedelta(days=1)
+
+    limit = 200
+    max_pages = 40  # up to 8k records
 
     markets = []
-    for m in result:
-        q = (m.get("question") or "").lower()
-        slug = m.get("slug", "")
-        matches_window = f"-{window}-" in slug
-        if any(p in q for p in patterns) and matches_window:
-            condition_id = m.get("conditionId", "")
-            closed = m.get("closed", False)
-            if not closed and slug:
-                # Prefer Gamma endDate when present; it's authoritative.
-                end_time = _parse_iso_dt(m.get("endDate") or m.get("end_date"))
-                if not end_time:
-                    # Fallback: parse from question (best effort)
-                    end_time = _parse_fast_market_end_time(m.get("question", ""))
+    for page in range(max_pages):
+        offset = page * limit
+        url = (
+            "https://gamma-api.polymarket.com/markets"
+            f"?limit={limit}&offset={offset}&closed=false&tag=crypto&order=endDate&ascending=true"
+        )
+        result = _api_request(url)
+        if not result or (isinstance(result, dict) and result.get("error")):
+            break
 
-                # Capture CLOB token IDs for live price fetching
-                clob_tokens_raw = m.get("clobTokenIds", "[]")
-                if isinstance(clob_tokens_raw, str):
-                    try:
-                        clob_tokens = json.loads(clob_tokens_raw)
-                    except (json.JSONDecodeError, ValueError):
-                        clob_tokens = []
-                else:
-                    clob_tokens = clob_tokens_raw or []
+        # Determine page time range (best-effort)
+        page_end_dates = [
+            _parse_iso_dt(m.get("endDate") or m.get("end_date"))
+            for m in result
+        ]
+        page_end_dates = [d for d in page_end_dates if d]
+        if page_end_dates:
+            page_min = min(page_end_dates)
+            page_max = max(page_end_dates)
+            # If we've paged beyond our future band, we're done.
+            if page_min > band_future:
+                break
+            # If this entire page is still before our past band, keep paging.
+            if page_max < band_past:
+                continue
 
-                markets.append({
-                    "question": m.get("question", ""),
-                    "slug": slug,
-                    "condition_id": condition_id,
-                    "end_time": end_time,
-                    "outcomes": m.get("outcomes", []),
-                    "outcome_prices": m.get("outcomePrices", "[]"),
-                    "clob_token_ids": clob_tokens,
-                    "fee_rate_bps": int(m.get("fee_rate_bps") or m.get("feeRateBps") or 0),
-                })
+        for m in result:
+            q = (m.get("question") or "").lower()
+            slug = m.get("slug", "")
+            matches_window = f"-{window}-" in slug
+            if any(p in q for p in patterns) and matches_window:
+                condition_id = m.get("conditionId", "")
+                closed = m.get("closed", False)
+                if not closed and slug:
+                    # Prefer Gamma endDate when present; it's authoritative.
+                    end_time = _parse_iso_dt(m.get("endDate") or m.get("end_date"))
+                    if not end_time:
+                        # Fallback: parse from question (best effort)
+                        end_time = _parse_fast_market_end_time(m.get("question", ""))
+
+                    # Only keep markets in our time band around now.
+                    if end_time and (end_time < band_past or end_time > band_future):
+                        continue
+
+                    # Capture CLOB token IDs for live price fetching
+                    clob_tokens_raw = m.get("clobTokenIds", "[]")
+                    if isinstance(clob_tokens_raw, str):
+                        try:
+                            clob_tokens = json.loads(clob_tokens_raw)
+                        except (json.JSONDecodeError, ValueError):
+                            clob_tokens = []
+                    else:
+                        clob_tokens = clob_tokens_raw or []
+
+                    markets.append({
+                        "question": m.get("question", ""),
+                        "slug": slug,
+                        "condition_id": condition_id,
+                        "end_time": end_time,
+                        "outcomes": m.get("outcomes", []),
+                        "outcome_prices": m.get("outcomePrices", "[]"),
+                        "clob_token_ids": clob_tokens,
+                        "fee_rate_bps": int(m.get("fee_rate_bps") or m.get("feeRateBps") or 0),
+                    })
     return markets
 
 
