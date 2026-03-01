@@ -1192,6 +1192,7 @@ if __name__ == "__main__":
                 continue
 
         equity = cash + unreal
+
         # Hourly delta based on equity history
         hist_path = skill_dir / "paper_equity_history.jsonl"
         now_ts = time.time()
@@ -1199,7 +1200,7 @@ if __name__ == "__main__":
         if hist_path.exists():
             try:
                 lines = hist_path.read_text().splitlines()
-                for line in reversed(lines[-200:]):
+                for line in reversed(lines[-500:]):
                     row = json.loads(line)
                     if now_ts - float(row.get("ts", 0)) >= 3600:
                         past_equity = float(row.get("equity", 0))
@@ -1216,9 +1217,45 @@ if __name__ == "__main__":
             pass
 
         if delta is None:
-            print(f"PAPER REPORT | equity=${equity:.2f} cash=${cash:.2f} unreal=${unreal:.2f} pos={len(positions)}")
-        else:
-            print(f"PAPER REPORT | equity=${equity:.2f} (Δ1h {delta:+.2f}) cash=${cash:.2f} unreal=${unreal:.2f} pos={len(positions)}")
+            return f"PAPER REPORT | equity=${equity:.2f} cash=${cash:.2f} unreal=${unreal:.2f} pos={len(positions)}"
+        return f"PAPER REPORT | equity=${equity:.2f} (Δ1h {delta:+.2f}) cash=${cash:.2f} unreal=${unreal:.2f} pos={len(positions)}"
+
+    def market_health_report():
+        now = datetime.now(timezone.utc)
+        markets = discover_fast_market_markets(ASSET, WINDOW)
+        scanned = len(markets)
+
+        live = []
+        max_remaining = _window_seconds.get(WINDOW, 300) * 2
+        for m in markets:
+            end_time = m.get("end_time")
+            if not end_time:
+                continue
+            rem = (end_time - now).total_seconds()
+            if rem <= 0:
+                continue
+            if not (rem > MIN_TIME_REMAINING and rem < max_remaining):
+                continue
+            book = fetch_orderbook_summary(m)
+            if not book:
+                continue
+            spread = float(book.get("spread_pct") or 999)
+            bid = float(book.get("best_bid") or 0)
+            ask = float(book.get("best_ask") or 1)
+            depth = min(float(book.get("bid_depth_usd") or 0), float(book.get("ask_depth_usd") or 0))
+            live.append((spread, depth, bid, ask, rem, m.get("slug"), m.get("question", "")))
+
+        # Liquidity filter
+        ok = [x for x in live if x[0] <= MAX_SPREAD_PCT and x[2] > 0.05 and x[3] < 0.95 and x[1] >= 200]
+        live.sort(key=lambda x: (x[0], -x[1]))
+        top = live[:3]
+
+        lines = [
+            f"MARKET HEALTH | scanned={scanned} live={len(live)} liquid={len(ok)} (spread<={MAX_SPREAD_PCT:.0%}, depth>=200)",
+        ]
+        for spread, depth, bid, ask, rem, slug, q in top:
+            lines.append(f"  top: spread={spread:.1%} bid={bid:.3f} ask={ask:.3f} depth~${depth:.0f} rem={int(rem)}s")
+        return "\n".join(lines)
 
     # Mode selection
     if args.live and args.paper:
@@ -1226,7 +1263,8 @@ if __name__ == "__main__":
         sys.exit(2)
 
     if args.paper_report:
-        paper_report()
+        print(paper_report())
+        print(market_health_report())
         sys.exit(0)
 
     paper_mode = bool(args.paper)
