@@ -20,6 +20,7 @@ import sys
 import json
 import math
 import argparse
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.request import urlopen, Request
@@ -1135,6 +1136,7 @@ if __name__ == "__main__":
     parser.add_argument("--paper", action="store_true", help="Paper trade with a local $100 ledger (no real orders)")
     parser.add_argument("--dry-run", action="store_true", help="Show opportunities without trading (no orders)")
     parser.add_argument("--positions", action="store_true", help="Show current fast market positions")
+    parser.add_argument("--paper-report", action="store_true", help="Print paper P&L report (no trading)")
     parser.add_argument("--config", action="store_true", help="Show current config")
     parser.add_argument("--set", action="append", metavar="KEY=VALUE",
                         help="Update config (e.g., --set entry_threshold=0.08)")
@@ -1168,10 +1170,64 @@ if __name__ == "__main__":
         print(f"✅ Config updated: {json.dumps(updates)}")
         sys.exit(0)
 
+    def paper_report():
+        skill_dir = Path(__file__).parent
+        broker = broker_from_env(skill_dir)
+        st = broker.snapshot()
+        cash = float(st.get("cash_usd", 0.0))
+        realized = float(st.get("realized_pnl_usd", 0.0))
+        positions = st.get("positions", {}) or {}
+
+        unreal = 0.0
+        for p in positions.values():
+            try:
+                token_id = str(p.get("token_id"))
+                shares = float(p.get("shares", 0))
+                avg_entry = float(p.get("avg_entry", 0))
+                mid = fetch_live_midpoint(token_id)
+                if mid is None:
+                    continue
+                unreal += shares * (mid - avg_entry)
+            except Exception:
+                continue
+
+        equity = cash + unreal
+        # Hourly delta based on equity history
+        hist_path = skill_dir / "paper_equity_history.jsonl"
+        now_ts = time.time()
+        past_equity = None
+        if hist_path.exists():
+            try:
+                lines = hist_path.read_text().splitlines()
+                for line in reversed(lines[-200:]):
+                    row = json.loads(line)
+                    if now_ts - float(row.get("ts", 0)) >= 3600:
+                        past_equity = float(row.get("equity", 0))
+                        break
+            except Exception:
+                pass
+        delta = None if past_equity is None else (equity - past_equity)
+
+        # append snapshot
+        try:
+            with hist_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"ts": now_ts, "equity": equity, "cash": cash, "unreal": unreal, "realized": realized}) + "\n")
+        except Exception:
+            pass
+
+        if delta is None:
+            print(f"PAPER REPORT | equity=${equity:.2f} cash=${cash:.2f} unreal=${unreal:.2f} pos={len(positions)}")
+        else:
+            print(f"PAPER REPORT | equity=${equity:.2f} (Δ1h {delta:+.2f}) cash=${cash:.2f} unreal=${unreal:.2f} pos={len(positions)}")
+
     # Mode selection
     if args.live and args.paper:
         print("Error: choose only one: --live or --paper")
         sys.exit(2)
+
+    if args.paper_report:
+        paper_report()
+        sys.exit(0)
 
     paper_mode = bool(args.paper)
     dry_run = (not args.live) and (not paper_mode)

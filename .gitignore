@@ -1,6 +1,7 @@
 # Paper trading state
 paper_ledger.json
 paper_trades.jsonl
+paper_equity_history.jsonl
 
 # Python
 __pycache__/
