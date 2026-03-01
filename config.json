@@ -6,6 +6,6 @@
   "min_time_remaining": 60,
   "asset": "BTC",
   "window": "5m",
-  "signal_source": "binance",
+  "signal_source": "coinbase",
   "volume_confidence": true
 }
