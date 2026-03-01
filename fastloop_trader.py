@@ -214,19 +214,72 @@ def fetch_live_midpoint(token_id):
         return None
 
 
-def fetch_live_prices(clob_token_ids):
+def _parse_outcome_prices(market: dict):
+    raw = market.get("outcome_prices") or market.get("outcomePrices") or "[]"
+    try:
+        if isinstance(raw, str):
+            return [float(x) for x in json.loads(raw)]
+        if isinstance(raw, list):
+            return [float(x) for x in raw]
+    except Exception:
+        pass
+    return []
+
+
+def select_yes_token_id(market: dict):
+    """Best-effort mapping of Gamma clobTokenIds -> YES token id.
+
+    Gamma often returns clobTokenIds as [tokenA, tokenB] but order isn't guaranteed.
+    We'll choose the token whose midpoint is closest to the market's YES price.
+
+    Returns: (yes_token_id, no_token_id) or (None, None)
+    """
+    clob = market.get("clob_token_ids") or market.get("clobTokenIds") or []
+    if isinstance(clob, str):
+        try:
+            clob = json.loads(clob)
+        except Exception:
+            clob = []
+    if not clob or len(clob) < 2:
+        return None, None
+
+    t0, t1 = clob[0], clob[1]
+
+    # Approx YES price from Gamma snapshot (fallback)
+    prices = _parse_outcome_prices(market)
+    gamma_yes = prices[0] if prices else None
+
+    m0 = fetch_live_midpoint(t0)
+    m1 = fetch_live_midpoint(t1)
+
+    # If we can't fetch midpoints, fall back to original ordering.
+    if m0 is None or m1 is None or gamma_yes is None:
+        return t0, t1
+
+    d0 = abs(m0 - gamma_yes)
+    d1 = abs(m1 - gamma_yes)
+    if d0 <= d1:
+        return t0, t1
+    return t1, t0
+
+
+def fetch_live_prices(market_or_clob):
     """Fetch live YES midpoint from Polymarket CLOB.
 
-    Args:
-        clob_token_ids: List of [yes_token_id, no_token_id] from Gamma.
-
-    Returns:
-        float or None: Live YES price (0-1).
+    Accepts either:
+      - market dict (preferred)
+      - clob token id list (legacy)
     """
+    if isinstance(market_or_clob, dict):
+        yes_token, _ = select_yes_token_id(market_or_clob)
+        if not yes_token:
+            return None
+        return fetch_live_midpoint(yes_token)
+
+    clob_token_ids = market_or_clob
     if not clob_token_ids or len(clob_token_ids) < 1:
         return None
-    yes_token = clob_token_ids[0]
-    return fetch_live_midpoint(yes_token)
+    return fetch_live_midpoint(clob_token_ids[0])
 
 
 def fetch_orderbook(token_id):
@@ -241,8 +294,10 @@ def fetch_orderbook(token_id):
     return {"bids": bids, "asks": asks}
 
 
-def fetch_orderbook_summary(clob_token_ids):
+def fetch_orderbook_summary(market_or_clob):
     """Fetch order book for YES token and return spread + depth summary.
+
+    Accepts either market dict (preferred) or clob token list.
 
     Args:
         clob_token_ids: List of [yes_token_id, no_token_id] from Gamma.
@@ -251,9 +306,17 @@ def fetch_orderbook_summary(clob_token_ids):
         dict with spread_pct, best_bid, best_ask, bid_depth_usd, ask_depth_usd
         or None on failure.
     """
-    if not clob_token_ids or len(clob_token_ids) < 1:
-        return None
-    yes_token = clob_token_ids[0]
+    if isinstance(market_or_clob, dict):
+        yes_token, _ = select_yes_token_id(market_or_clob)
+        if not yes_token:
+            return None
+        clob_token_ids = market_or_clob.get("clob_token_ids") or market_or_clob.get("clobTokenIds") or []
+    else:
+        clob_token_ids = market_or_clob
+        if not clob_token_ids or len(clob_token_ids) < 1:
+            return None
+        yes_token = clob_token_ids[0]
+
     book = fetch_orderbook(yes_token)
     if not book:
         return None
@@ -432,7 +495,7 @@ def find_best_fast_market(markets):
             continue
 
         clob_tokens = m.get("clob_token_ids") or []
-        book = fetch_orderbook_summary(clob_tokens) if clob_tokens else None
+        book = fetch_orderbook_summary(m) if clob_tokens else None
         if not book:
             continue
 
@@ -655,7 +718,11 @@ def execute_trade(market_id, side, amount, *, paper_mode=False, paper_ctx=None):
             if len(clob_token_ids) < 2:
                 return {"success": False, "error": "missing clob token ids", "simulated": True}
 
-            yes_token, no_token = clob_token_ids[0], clob_token_ids[1]
+            # Resolve YES/NO token IDs reliably
+            yes_token, no_token = select_yes_token_id({"clob_token_ids": clob_token_ids, "outcome_prices": paper_ctx.get("outcome_prices")})
+            if not yes_token or not no_token:
+                yes_token, no_token = clob_token_ids[0], clob_token_ids[1]
+
             token_id = yes_token if side == "yes" else no_token
 
             book = fetch_orderbook(token_id)
@@ -819,7 +886,7 @@ def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=Fal
 
     # Fetch live CLOB price (falls back to stale Gamma snapshot)
     clob_tokens = best.get("clob_token_ids", [])
-    live_price = fetch_live_prices(clob_tokens) if clob_tokens else None
+    live_price = fetch_live_prices(best) if clob_tokens else None
     if live_price is not None:
         market_yes_price = live_price
         log(f"  Current YES price: ${market_yes_price:.3f} (live CLOB)")
@@ -868,7 +935,7 @@ def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=Fal
             _automaton_reported = True
 
     # Check order book spread and depth
-    book = best.get("_book") or (fetch_orderbook_summary(clob_tokens) if clob_tokens else None)
+    book = best.get("_book") or (fetch_orderbook_summary(best) if clob_tokens else None)
     if book:
         log(f"  Spread: {book['spread_pct']:.1%} (bid ${book['best_bid']:.3f} / ask ${book['best_ask']:.3f})")
         log(f"  Depth: ${book['bid_depth_usd']:.0f} bid / ${book['ask_depth_usd']:.0f} ask (top 5)")
@@ -992,6 +1059,7 @@ def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=Fal
                 "market_slug": best["slug"],
                 "question": best.get("question", ""),
                 "clob_token_ids": clob_tokens,
+                "outcome_prices": best.get("outcome_prices"),
             },
         )
     else:
