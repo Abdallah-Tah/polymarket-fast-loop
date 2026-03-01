@@ -1245,12 +1245,12 @@ if __name__ == "__main__":
             delta_str = f"{delta:+.2f}"
 
         return (
-            "PAPER TRADING REPORT\n"
-            f"• Equity: ${equity:.2f}\n"
-            f"• Δ1h: {delta_str}\n"
-            f"• Cash: ${cash:.2f}\n"
-            f"• Unrealized P/L: ${unreal:.2f}\n"
-            f"• Open Positions: {len(positions)}"
+            "📊 PAPER TRADING REPORT\n"
+            f"• 💼 Equity: ${equity:.2f}\n"
+            f"• ⏱️ Δ1h: {delta_str}\n"
+            f"• 💵 Cash: ${cash:.2f}\n"
+            f"• 📈 Unrealized P/L: ${unreal:.2f}\n"
+            f"• 🧾 Open Positions: {len(positions)}"
         )
 
     def market_health_report():
@@ -1287,13 +1287,13 @@ if __name__ == "__main__":
         top = live[:3]
 
         lines = [
-            "MARKET HEALTH\n"
-            f"• Scanned: {scanned}\n"
-            f"• Live Now: {len(live)}\n"
-            f"• Liquid (spread≤{MAX_SPREAD_PCT:.0%}, depth≥200): {len(ok)}\n"
-            f"• Assets: {', '.join([a.strip().upper() for a in FASTLOOP_ASSETS])}\n"
-            f"• Windows: {', '.join([w.strip() for w in FASTLOOP_WINDOWS])}\n"
-            "• Top Liquidity Samples:"
+            "🧪 MARKET HEALTH\n"
+            f"• 🔎 Scanned: {scanned}\n"
+            f"• ✅ Live Now: {len(live)}\n"
+            f"• 🧊 Liquid (spread≤{MAX_SPREAD_PCT:.0%}, depth≥200): {len(ok)}\n"
+            f"• 🧭 Assets: {', '.join([a.strip().upper() for a in FASTLOOP_ASSETS])}\n"
+            f"• 🕒 Windows: {', '.join([w.strip() for w in FASTLOOP_WINDOWS])}\n"
+            "• 🧾 Top Liquidity Samples:"
         ]
         for spread, depth, bid, ask, rem, slug, q in top:
             lines.append(
