@@ -55,8 +55,8 @@ CONFIG_SCHEMA = {
                          "help": "Min BTC % move in lookback window to trigger"},
     "max_position": {"default": 5.0, "env": "SIMMER_SPRINT_MAX_POSITION", "type": float,
                      "help": "Max $ per trade"},
-    "signal_source": {"default": "binance", "env": "SIMMER_SPRINT_SIGNAL", "type": str,
-                      "help": "Price feed source (binance)"},
+    "signal_source": {"default": "coinbase", "env": "SIMMER_SPRINT_SIGNAL", "type": str,
+                      "help": "Price feed source (coinbase|binance)"},
     "lookback_minutes": {"default": 5, "env": "SIMMER_SPRINT_LOOKBACK", "type": int,
                          "help": "Minutes of price history for momentum calc"},
     "min_time_remaining": {"default": 0, "env": "SIMMER_SPRINT_MIN_TIME", "type": int,
@@ -486,14 +486,59 @@ def get_binance_momentum(symbol="BTCUSDT", lookback_minutes=5):
 COINGECKO_ASSETS = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana"}
 
 
+def get_coinbase_momentum(product="BTC-USD", lookback_minutes=5):
+    """Get price momentum from Coinbase Exchange public candles.
+
+    Endpoint returns candles newest-first: [time, low, high, open, close, volume]
+    """
+    # Coinbase limits: max 300 candles per request.
+    url = (
+        f"https://api.exchange.coinbase.com/products/{product}/candles"
+        f"?granularity=60&limit={lookback_minutes}"
+    )
+    result = _api_request(url)
+    if not result or isinstance(result, dict):
+        return None
+
+    try:
+        candles = result
+        if len(candles) < 2:
+            return None
+        # newest-first -> reverse to oldest-first
+        candles = list(reversed(candles))
+        price_then = float(candles[0][3])  # open
+        price_now = float(candles[-1][4])  # close
+        momentum_pct = ((price_now - price_then) / price_then) * 100
+        direction = "up" if momentum_pct > 0 else "down"
+        volumes = [float(c[5]) for c in candles]
+        avg_volume = sum(volumes) / len(volumes) if volumes else 0
+        latest_volume = volumes[-1] if volumes else 0
+        volume_ratio = latest_volume / avg_volume if avg_volume > 0 else 1.0
+        return {
+            "momentum_pct": momentum_pct,
+            "direction": direction,
+            "price_now": price_now,
+            "price_then": price_then,
+            "avg_volume": avg_volume,
+            "latest_volume": latest_volume,
+            "volume_ratio": volume_ratio,
+            "candles": len(candles),
+        }
+    except Exception:
+        return None
+
+
 def get_momentum(asset="BTC", source="binance", lookback=5):
     """Get price momentum from configured source."""
     if source == "binance":
         symbol = ASSET_SYMBOLS.get(asset, "BTCUSDT")
         return get_binance_momentum(symbol, lookback)
+    if source == "coinbase":
+        product = {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD"}.get(asset, "BTC-USD")
+        return get_coinbase_momentum(product, lookback)
     elif source == "coingecko":
-        print("  ⚠️  CoinGecko free tier doesn't provide candle data — switch to binance")
-        print("  Run: python fastloop_trader.py --set signal_source=binance")
+        print("  ⚠️  CoinGecko free tier doesn't provide candle data — switch to coinbase")
+        print("  Run: python fastloop_trader.py --set signal_source=coinbase")
         return None
     else:
         return None
