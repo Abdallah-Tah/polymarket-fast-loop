@@ -305,9 +305,11 @@ def _parse_iso_dt(dt: str):
 def discover_fast_market_markets(asset="BTC", window="5m"):
     """Find active fast markets on Polymarket via Gamma API."""
     patterns = ASSET_PATTERNS.get(asset, ASSET_PATTERNS["BTC"])
+    # NOTE: Gamma sometimes returns stale fast markets with very old endDate but closed=false.
+    # Fetch newest first to increase chance of including current windows in the first page.
     url = (
         "https://gamma-api.polymarket.com/markets"
-        "?limit=200&closed=false&tag=crypto&order=endDate&ascending=true"
+        "?limit=500&closed=false&tag=crypto&order=endDate&ascending=false"
     )
     result = _api_request(url)
     if not result or (isinstance(result, dict) and result.get("error")):
