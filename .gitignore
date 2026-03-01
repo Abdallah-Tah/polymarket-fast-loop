@@ -1,0 +1,8 @@
+# Paper trading state
+paper_ledger.json
+paper_trades.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.venv/

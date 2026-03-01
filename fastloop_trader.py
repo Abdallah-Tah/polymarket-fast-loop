@@ -21,9 +21,12 @@ import json
 import math
 import argparse
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, quote
+
+from paper_broker import broker_from_env
 
 # Force line-buffered stdout for non-TTY environments (cron, Docker, OpenClaw)
 sys.stdout.reconfigure(line_buffering=True)
@@ -226,6 +229,18 @@ def fetch_live_prices(clob_token_ids):
     return fetch_live_midpoint(yes_token)
 
 
+def fetch_orderbook(token_id):
+    """Fetch Polymarket CLOB orderbook for a token id."""
+    result = _api_request(f"{CLOB_API}/book?token_id={quote(str(token_id))}", timeout=5)
+    if not result or not isinstance(result, dict):
+        return None
+    bids = result.get("bids", [])
+    asks = result.get("asks", [])
+    if not bids or not asks:
+        return None
+    return {"bids": bids, "asks": asks}
+
+
 def fetch_orderbook_summary(clob_token_ids):
     """Fetch order book for YES token and return spread + depth summary.
 
@@ -239,12 +254,12 @@ def fetch_orderbook_summary(clob_token_ids):
     if not clob_token_ids or len(clob_token_ids) < 1:
         return None
     yes_token = clob_token_ids[0]
-    result = _api_request(f"{CLOB_API}/book?token_id={quote(str(yes_token))}", timeout=5)
-    if not result or not isinstance(result, dict):
+    book = fetch_orderbook(yes_token)
+    if not book:
         return None
 
-    bids = result.get("bids", [])
-    asks = result.get("asks", [])
+    bids = book.get("bids", [])
+    asks = book.get("asks", [])
     if not bids or not asks:
         return None
 
@@ -490,8 +505,55 @@ def get_positions():
         return []
 
 
-def execute_trade(market_id, side, amount):
-    """Execute a trade on Simmer."""
+def execute_trade(market_id, side, amount, *, paper_mode=False, paper_ctx=None):
+    """Execute a trade.
+
+    - live (default): uses Simmer SDK
+    - paper_mode: uses local PaperBroker ledger (no wallet, no real trades)
+
+    paper_ctx expects: {market_slug, question, clob_token_ids}
+    """
+
+    if paper_mode:
+        try:
+            if not paper_ctx:
+                return {"success": False, "error": "paper_ctx missing", "simulated": True}
+            market_slug = paper_ctx.get("market_slug")
+            question = paper_ctx.get("question", "")
+            clob_token_ids = paper_ctx.get("clob_token_ids") or []
+
+            if side not in ("yes", "no"):
+                return {"success": False, "error": f"invalid side: {side}", "simulated": True}
+            if len(clob_token_ids) < 2:
+                return {"success": False, "error": "missing clob token ids", "simulated": True}
+
+            yes_token, no_token = clob_token_ids[0], clob_token_ids[1]
+            token_id = yes_token if side == "yes" else no_token
+
+            book = fetch_orderbook(token_id)
+            if not book:
+                return {"success": False, "error": "failed to fetch orderbook", "simulated": True}
+            asks = book.get("asks") or []
+            if not asks:
+                return {"success": False, "error": "empty orderbook asks", "simulated": True}
+            best_ask = float(asks[0].get("price"))
+            midpoint = fetch_live_midpoint(token_id)
+
+            broker = broker_from_env(Path(__file__).parent)
+            return broker.place_market_buy(
+                market_slug=market_slug,
+                question=question,
+                token_id=str(token_id),
+                side=side,
+                amount_usd=float(amount),
+                best_ask=best_ask,
+                midpoint=midpoint,
+                metadata={"strategy": "fastloop", "market_id": market_id},
+            )
+        except Exception as e:
+            return {"success": False, "error": str(e), "simulated": True}
+
+    # Live/simmer path
     try:
         result = get_client().trade(
             market_id=market_id,
@@ -530,7 +592,7 @@ def calculate_position_size(max_size, smart_sizing=False):
 # =============================================================================
 
 def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=False,
-                        smart_sizing=False, quiet=False):
+                        smart_sizing=False, quiet=False, paper_mode=False):
     """Run one cycle of the fast_market trading strategy."""
 
     def log(msg, force=False):
@@ -541,8 +603,10 @@ def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=Fal
     log("⚡ Simmer FastLoop Trading Skill")
     log("=" * 50)
 
-    if dry_run:
-        log("\n  [PAPER MODE] Trades will be simulated with real prices. Use --live for real trades.")
+    if paper_mode:
+        log("\n  [PAPER BROKER] Trades will be simulated with a local $ balance + real orderbooks. Use --live for real trades.")
+    elif dry_run:
+        log("\n  [DRY RUN] No trades will be executed. Use --live for real trades.")
 
     log(f"\n⚙️  Configuration:")
     log(f"  Asset:            {ASSET}")
@@ -566,8 +630,9 @@ def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=Fal
         log(f'    Or edit config.json directly')
         return
 
-    # Initialize client early to validate API key (paper mode when not live)
-    get_client(live=not dry_run)
+    # Initialize client early to validate API key (only needed when using Simmer)
+    if not paper_mode:
+        get_client(live=not dry_run)
 
     # Show positions if requested
     if positions_only:
@@ -779,27 +844,46 @@ def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=Fal
     log(f"  Divergence: {divergence:.3f}", force=True)
 
     # Step 5: Import & Trade
-    log(f"\n🔗 Importing to Simmer...", force=True)
-    market_id, import_error = import_fast_market_market(best["slug"])
-
-    if not market_id:
-        log(f"  ❌ Import failed: {import_error}", force=True)
-        return
-
-    log(f"  ✅ Market ID: {market_id[:16]}...", force=True)
-
     execution_error = None
-    tag = "SIMULATED" if dry_run else "LIVE"
-    log(f"  Executing {side.upper()} trade for ${position_size:.2f} ({tag})...", force=True)
-    result = execute_trade(market_id, side, position_size)
+
+    if paper_mode:
+        # No Simmer import or wallet interaction in paper mode.
+        market_id = f"paper:{best['slug']}"
+        tag = "PAPER"
+        log(f"\n🧾 Paper trade (no real orders)...", force=True)
+        log(f"  Executing {side.upper()} paper trade for ${position_size:.2f} ({tag})...", force=True)
+        result = execute_trade(
+            market_id,
+            side,
+            position_size,
+            paper_mode=True,
+            paper_ctx={
+                "market_slug": best["slug"],
+                "question": best.get("question", ""),
+                "clob_token_ids": clob_tokens,
+            },
+        )
+    else:
+        log(f"\n🔗 Importing to Simmer...", force=True)
+        market_id, import_error = import_fast_market_market(best["slug"])
+
+        if not market_id:
+            log(f"  ❌ Import failed: {import_error}", force=True)
+            return
+
+        log(f"  ✅ Market ID: {market_id[:16]}...", force=True)
+
+        tag = "SIMULATED" if dry_run else "LIVE"
+        log(f"  Executing {side.upper()} trade for ${position_size:.2f} ({tag})...", force=True)
+        result = execute_trade(market_id, side, position_size)
 
     if result and result.get("success"):
         shares = result.get("shares_bought") or result.get("shares") or 0
         trade_id = result.get("trade_id")
         log(f"  ✅ {'[PAPER] ' if result.get('simulated') else ''}Bought {shares:.1f} {side.upper()} shares @ ${price:.3f}", force=True)
 
-        # Update daily spend (skip for paper trades)
-        if not result.get("simulated"):
+        # Update daily spend (track live and paper separately)
+        if paper_mode or not result.get("simulated"):
             daily_spend["spent"] += position_size
             daily_spend["trades"] += 1
             _save_daily_spend(__file__, daily_spend)
@@ -848,8 +932,9 @@ def run_fast_market_strategy(dry_run=True, positions_only=False, show_config=Fal
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simmer FastLoop Trading Skill")
-    parser.add_argument("--live", action="store_true", help="Execute real trades (default is dry-run)")
-    parser.add_argument("--dry-run", action="store_true", help="(Default) Show opportunities without trading")
+    parser.add_argument("--live", action="store_true", help="Execute real trades")
+    parser.add_argument("--paper", action="store_true", help="Paper trade with a local $100 ledger (no real orders)")
+    parser.add_argument("--dry-run", action="store_true", help="Show opportunities without trading (no orders)")
     parser.add_argument("--positions", action="store_true", help="Show current fast market positions")
     parser.add_argument("--config", action="store_true", help="Show current config")
     parser.add_argument("--set", action="append", metavar="KEY=VALUE",
@@ -884,7 +969,13 @@ if __name__ == "__main__":
         print(f"✅ Config updated: {json.dumps(updates)}")
         sys.exit(0)
 
-    dry_run = not args.live
+    # Mode selection
+    if args.live and args.paper:
+        print("Error: choose only one: --live or --paper")
+        sys.exit(2)
+
+    paper_mode = bool(args.paper)
+    dry_run = (not args.live) and (not paper_mode)
 
     run_fast_market_strategy(
         dry_run=dry_run,
@@ -892,6 +983,7 @@ if __name__ == "__main__":
         show_config=args.config,
         smart_sizing=args.smart_sizing,
         quiet=args.quiet,
+        paper_mode=paper_mode,
     )
 
     # Fallback report for automaton if the strategy returned early (no signal)
